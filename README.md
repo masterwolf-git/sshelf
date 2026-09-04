@@ -32,8 +32,10 @@ independent database, so it never risks corrupting a config shared with Ansible/
 editor — and it adds what plain SSH config can't express:
 
 - **Fuzzy launcher** — type to filter, `Enter` to connect; your most-used hosts float to the top.
-- **Dual-pane file transfer** (`Ctrl-t`) — copy files and folders both ways over SFTP, with
-  fuzzy search on both sides and one authentication.
+- **Dual-pane file transfer** (`Ctrl-t`) — mark several files or folders and send them both ways
+  over SFTP, create directories with `F7`, all on one authentication.
+- **tmux mode** — `Enter` opens each host in a new tmux window or pane and leaves you in the
+  picker, so you can fire off a handful in a row.
 - **Background port forwarding** (`Ctrl-f`) — Local / Remote / SOCKS tunnels that keep running
   after you quit; `F4` lists and stops them.
 - **Sites & tags** (`F3`) — group hosts; a site can carry a shared bastion + defaults that
@@ -46,6 +48,9 @@ editor — and it adds what plain SSH config can't express:
 - **Tailscale import** — `sshelf import --tailscale` turns your whole tailnet into searchable
   hosts (MagicDNS names, tailnet as a site, ACL tags as tags), by running your own `tailscale`
   CLI. Add-only, so re-running is safe.
+- **`sshelf doctor`** — one command that checks your OpenSSH version, secret backend, host
+  database, sites, agent, and export, and names the fix for anything that's off. Local and
+  read-only; it never contacts a host.
 - **Jump hosts, a guided add/edit form, frecency ordering, read-only import** from `~/.ssh/config`.
 
 **Never:** no telemetry, no account, no cloud — and it will never edit your SSH config.
@@ -103,6 +108,7 @@ sshelf -                      # reconnect to the most recently used host
 sshelf list tag:prod --json   # scriptable listing (fields + generated command)
 sshelf print-command db       # print the ssh command instead of running it
 sshelf export                 # Include file so plain ssh/scp/VS Code see your hosts
+sshelf doctor                 # something not working? check the setup and get told the fix
 ```
 
 In the TUI: type to filter (plus `tag:NAME` / `site:NAME`), `Enter` to connect — **`F1` shows
@@ -115,7 +121,8 @@ The **[user guide](https://max-rh.github.io/sshelf/)** covers everything:
 [Quickstart](https://max-rh.github.io/sshelf/quickstart.html) ·
 [CLI reference](https://max-rh.github.io/sshelf/cli.html) ·
 [Configuration](https://max-rh.github.io/sshelf/configuration.html) ·
-[FAQ](https://max-rh.github.io/sshelf/faq.html) — plus per-feature pages for
+[FAQ](https://max-rh.github.io/sshelf/faq.html) ·
+[`sshelf doctor`](https://max-rh.github.io/sshelf/doctor.html) — plus per-feature pages for
 [file transfer](https://max-rh.github.io/sshelf/transfer.html),
 [port forwarding](https://max-rh.github.io/sshelf/port-forwarding.html),
 [sites & tags](https://max-rh.github.io/sshelf/sites-tags.html),
@@ -130,6 +137,12 @@ Secret Service (or an `age`-encrypted vault on headless systems) — never in `h
 never on a command line. `sshelf` makes **no network calls of its own** — no telemetry, no
 account, no cloud; the only network activity is the `ssh` it hands your terminal to. See
 [`SECURITY.md`](SECURITY.md) for the full threat model.
+
+## Questions & ideas
+
+Ask, suggest a feature, or show what you built with it in
+[**GitHub Discussions**](https://github.com/max-rh/sshelf/discussions). Contributions are
+welcome — start with [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Support
 

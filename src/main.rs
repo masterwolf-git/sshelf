@@ -8,6 +8,7 @@
 mod app;
 mod askpass;
 mod config;
+mod doctor;
 mod export;
 mod forwards;
 mod import;
@@ -38,13 +39,12 @@ use crate::model::{AuthMethod, Host, Site};
 use crate::paths::{CONFIG_ENV, Paths};
 use crate::state::FrecencyState;
 
+/// Note the absence of `args_conflicts_with_subcommands`: it counts the **global** flags as
+/// top-level args, so it rejected `sshelf --config FILE <subcommand>` outright — and, worse,
+/// read `sshelf --config FILE list` as "connect to a host named `list`". The one combination it
+/// was really guarding against is caught explicitly by [`reject_host_with_subcommand`].
 #[derive(Parser)]
-#[command(
-    name = "sshelf",
-    version,
-    about = "A TUI SSH host manager",
-    args_conflicts_with_subcommands = true
-)]
+#[command(name = "sshelf", version, about = "A TUI SSH host manager")]
 struct Cli {
     /// Use a specific config file (default: ~/.config/sshelf/config.toml).
     #[arg(long, global = true, value_name = "FILE")]
@@ -113,6 +113,11 @@ enum Command {
         #[command(subcommand)]
         action: Option<SitesAction>,
     },
+    /// Check the environment and the host database for the things that break connections:
+    /// the OpenSSH version, the secret backend, dangling site references, a stale export, a
+    /// missing ssh-agent. Local and read-only — it never contacts a host. Exits 1 if any
+    /// check failed (warnings don't).
+    Doctor,
     /// Print static shell completions to stdout (for packaging). For host-name completion,
     /// set up dynamic completions instead — see the README.
     Completions {
@@ -121,6 +126,25 @@ enum Command {
     },
     /// Print the man page (roff) to stdout.
     Man,
+}
+
+impl Command {
+    /// The subcommand's own name, for error messages. Kept next to the variants so a new
+    /// subcommand can't quietly go unnamed.
+    fn name(&self) -> &'static str {
+        match self {
+            Command::List { .. } => "list",
+            Command::Add(_) => "add",
+            Command::Import { .. } => "import",
+            Command::Export { .. } => "export",
+            Command::SetPassword { .. } => "set-password",
+            Command::Print { .. } => "print-command",
+            Command::Sites { .. } => "sites",
+            Command::Doctor => "doctor",
+            Command::Completions { .. } => "completions",
+            Command::Man => "man",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -277,6 +301,7 @@ fn main() -> Result<()> {
     CompleteEnv::with_factory(Cli::command).complete();
 
     let cli = Cli::parse();
+    reject_host_with_subcommand(cli.host.as_deref(), cli.command.as_ref())?;
     // `--config` is plumbed to all paths via the env var so subcommands + Paths resolution see
     // it uniformly. Set before any Paths::resolve().
     if let Some(path) = &cli.config {
@@ -305,6 +330,7 @@ fn main() -> Result<()> {
         Some(Command::SetPassword { host }) => cmd_set_password(&host),
         Some(Command::Print { host }) => cmd_print_command(&host),
         Some(Command::Sites { action }) => cmd_sites(action),
+        Some(Command::Doctor) => cmd_doctor(),
         Some(Command::Completions { shell }) => {
             clap_complete::generate(shell, &mut Cli::command(), "sshelf", &mut std::io::stdout());
             Ok(())
@@ -322,6 +348,24 @@ fn main() -> Result<()> {
     }
 }
 
+/// Reject `sshelf <HOST> <subcommand>`.
+///
+/// The bare positional means "connect to this host", so pairing it with a subcommand is always a
+/// mistake — and would be a *silent* one, since dispatch matches the subcommand first and the
+/// host would simply be dropped. This is the only combination the old blanket
+/// `args_conflicts_with_subcommands` was really guarding, and catching it here means the global
+/// `--config` / `--transfer-log` flags work on either side of a subcommand, as documented.
+fn reject_host_with_subcommand(host: Option<&str>, command: Option<&Command>) -> Result<()> {
+    let (Some(host), Some(command)) = (host, command) else {
+        return Ok(());
+    };
+    let sub = command.name();
+    anyhow::bail!(
+        "'{host}' is read as a host name, but '{sub}' is a subcommand — run one or the other \
+         (`sshelf {host}` connects to it; `sshelf {sub} …` takes no host in front)"
+    )
+}
+
 /// `sshelf import` — from `~/.ssh/config` by default, or from the user's Tailscale tailnet
 /// with `--tailscale`. Both sources are read-only and both are **add-only** toward
 /// `hosts.toml`: a re-run converges to "0 added".
@@ -336,7 +380,10 @@ fn cmd_import(dry_run: bool, tailscale: bool) -> Result<()> {
     } else {
         let path = import::default_config_path().context("HOME is not set")?;
         if !path.exists() {
-            anyhow::bail!("no ssh config at {}", path.display());
+            anyhow::bail!(
+                "no ssh config at {} — nothing to import; add hosts with `sshelf add` instead",
+                path.display()
+            );
         }
         let result = import::parse_file(&path)?;
         println!(
@@ -473,7 +520,9 @@ fn cmd_set_password(host_ref: &str) -> Result<()> {
     let host = hosts
         .iter()
         .find(|h| h.id == host_ref || h.name == host_ref)
-        .with_context(|| format!("no host with name or id '{host_ref}'"))?;
+        .with_context(|| {
+            format!("no host with name or id '{host_ref}' — run `sshelf list` to see your hosts")
+        })?;
 
     let mut line = String::new();
     std::io::stdin()
@@ -482,7 +531,11 @@ fn cmd_set_password(host_ref: &str) -> Result<()> {
         .context("reading password from stdin")?;
     let password = line.trim_end_matches(['\n', '\r']);
     if password.is_empty() {
-        anyhow::bail!("empty password; nothing stored");
+        anyhow::bail!(
+            "nothing on stdin — nothing stored; pipe the password in, e.g. \
+             `printf %s \"$PASS\" | sshelf set-password {}`",
+            host.name
+        );
     }
     secrets::store_password(&paths.vault_file(), &host.id, password)?;
     println!("stored password for \"{}\" ({})", host.name, host.id);
@@ -495,8 +548,9 @@ fn cmd_print_command(host_ref: &str) -> Result<()> {
     let _ = Config::ensure_default_file(&paths.config_file()); // best-effort
     let cfg = Config::load(&paths.config_file())?;
     let file = store::load_hosts(&cfg.hosts_path(&paths))?;
-    let host = resolve_host(&file.hosts, host_ref)
-        .with_context(|| format!("no host with name or id '{host_ref}'"))?;
+    let host = resolve_host(&file.hosts, host_ref).with_context(|| {
+        format!("no host with name or id '{host_ref}' — run `sshelf list` to see your hosts")
+    })?;
     println!(
         "{}",
         ssh::command_string(&host.with_site_defaults(&file.sites))
@@ -613,7 +667,10 @@ fn cmd_add(args: AddArgs) -> Result<()> {
             .context("reading secret from stdin")?;
         let s = line.trim_end_matches(['\n', '\r']).to_string();
         if s.is_empty() {
-            anyhow::bail!("--password-stdin given but stdin was empty; nothing added");
+            anyhow::bail!(
+                "--password-stdin was given but stdin was empty — nothing added; pipe the \
+                 secret in, e.g. `printf %s \"$PASS\" | sshelf add …`"
+            );
         }
         Some(s)
     } else {
@@ -635,6 +692,67 @@ fn cmd_add(args: AddArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `sshelf doctor` — gather every input, print one line per check, exit 1 if any failed.
+///
+/// Everything IO-shaped happens here so `doctor.rs` stays a set of pure functions over the
+/// results. Nothing here writes, with the single documented exception of the keyring probe
+/// (`secrets::probe`), which round-trips a throwaway entry and deletes it again.
+fn cmd_doctor() -> Result<()> {
+    let paths = Paths::resolve()?;
+    paths.ensure_dirs()?;
+    let _ = Config::ensure_default_file(&paths.config_file()); // best-effort
+    let cfg = Config::load(&paths.config_file())?;
+    let hosts_path = cfg.hosts_path(&paths);
+    let loaded = store::load_hosts(&hosts_path).map_err(|e| format!("{e:#}"));
+
+    // The exported fragment is compared against a freshly rendered one, so an empty database
+    // (or an unreadable one) still produces something to compare with.
+    let export_path = paths.ssh_config_file();
+    let export_display = export_path.display().to_string();
+    let export_fresh = match &loaded {
+        Ok(file) => export::render(file, &export_display),
+        Err(_) => String::new(),
+    };
+
+    let checks = doctor::run(&doctor::Inputs {
+        ssh_version: ssh_version(),
+        hosts: loaded.as_ref().map_err(Clone::clone),
+        hosts_path: &hosts_path,
+        backend: secrets::backend(),
+        probe: secrets::probe(&paths.vault_file()).map_err(|e| format!("{e:#}")),
+        stored_ids: secrets::stored_ids(&paths.vault_file()).ok().flatten(),
+        auth_sock: std::env::var("SSH_AUTH_SOCK").ok(),
+        export_existing: std::fs::read_to_string(&export_path).ok(),
+        export_fresh,
+        export_path: &export_path,
+    });
+
+    println!("sshelf doctor — checking this machine and your host database\n");
+    for check in &checks {
+        println!("{}", check.render());
+    }
+    println!("\n{}", doctor::summary(&checks));
+    if !doctor::healthy(&checks) {
+        // A plain exit code, not an anyhow error: the report above already said everything,
+        // and an "Error:" line on top of it would only repeat one of the checks. No terminal
+        // state to restore — `doctor` never enters the TUI.
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `ssh -V`, which OpenSSH prints on **stderr**. `None` if the binary can't be run at all.
+fn ssh_version() -> Option<String> {
+    let out = std::process::Command::new("ssh").arg("-V").output().ok()?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let text = text.trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
 fn cmd_sites(action: Option<SitesAction>) -> Result<()> {
@@ -715,7 +833,10 @@ fn cmd_sites_add(
     let hosts_path = cfg.hosts_path(&paths);
     let mut file = store::load_hosts(&hosts_path)?;
     if crate::model::find_site(&file.sites, &name).is_some() {
-        anyhow::bail!("a site named '{name}' already exists");
+        anyhow::bail!(
+            "a site named '{name}' already exists — pick another name, or edit that one with F3 \
+             in the TUI"
+        );
     }
     file.sites.push(Site {
         name: name.clone(),
@@ -897,6 +1018,77 @@ mod tests {
         assert!(c.command.is_none() && c.host.is_none());
     }
 
+    /// The regression this replaced `args_conflicts_with_subcommands` to fix: the **global**
+    /// flags must work on either side of a subcommand, as `docs/cli.md` documents.
+    #[test]
+    fn global_flags_work_before_and_after_a_subcommand() {
+        for argv in [
+            vec!["sshelf", "--config", "/tmp/x.toml", "list"],
+            vec!["sshelf", "list", "--config", "/tmp/x.toml"],
+        ] {
+            let c = Cli::try_parse_from(&argv).expect("--config is a global flag");
+            assert!(matches!(c.command, Some(Command::List { .. })), "{argv:?}");
+            assert_eq!(
+                c.config.as_deref(),
+                Some(std::path::Path::new("/tmp/x.toml"))
+            );
+            assert!(c.host.is_none(), "{argv:?} must not be read as a host name");
+        }
+        // Previously a hard parse error, and the reason `sshelf --config F doctor` was unusable.
+        let c = Cli::try_parse_from(["sshelf", "--config", "/tmp/x.toml", "doctor"]).unwrap();
+        assert!(matches!(c.command, Some(Command::Doctor)));
+        let c = Cli::try_parse_from(["sshelf", "--config", "/tmp/x.toml", "set-password", "web"])
+            .unwrap();
+        assert!(matches!(c.command, Some(Command::SetPassword { .. })));
+        // …and the same for the other global flag.
+        let c = Cli::try_parse_from(["sshelf", "--transfer-log", "/tmp/t.log", "list"]).unwrap();
+        assert!(matches!(c.command, Some(Command::List { .. })));
+        assert_eq!(
+            c.transfer_log.as_deref(),
+            Some(std::path::Path::new("/tmp/t.log"))
+        );
+    }
+
+    #[test]
+    fn a_host_and_a_subcommand_together_are_refused_not_silently_resolved() {
+        // clap parses both happily; dispatch would run the subcommand and drop the host, so the
+        // combination is rejected explicitly instead.
+        let c = Cli::try_parse_from(["sshelf", "prod-web", "list"]).unwrap();
+        assert_eq!(c.host.as_deref(), Some("prod-web"));
+        assert!(c.command.is_some());
+        let err = reject_host_with_subcommand(c.host.as_deref(), c.command.as_ref())
+            .expect_err("a host plus a subcommand is always a mistake")
+            .to_string();
+        assert!(err.contains("prod-web"), "{err}");
+        assert!(err.contains("'list' is a subcommand"), "{err}");
+        assert!(err.contains("`sshelf prod-web` connects"), "{err}");
+
+        // Either alone is fine.
+        assert!(reject_host_with_subcommand(Some("prod-web"), None).is_ok());
+        let c = Cli::try_parse_from(["sshelf", "list"]).unwrap();
+        assert!(reject_host_with_subcommand(None, c.command.as_ref()).is_ok());
+        assert!(reject_host_with_subcommand(None, None).is_ok());
+    }
+
+    #[test]
+    fn every_subcommand_reports_its_own_name() {
+        for (argv, expected) in [
+            (vec!["sshelf", "list"], "list"),
+            (vec!["sshelf", "add"], "add"),
+            (vec!["sshelf", "import"], "import"),
+            (vec!["sshelf", "export"], "export"),
+            (vec!["sshelf", "set-password", "web"], "set-password"),
+            (vec!["sshelf", "print-command", "web"], "print-command"),
+            (vec!["sshelf", "sites"], "sites"),
+            (vec!["sshelf", "doctor"], "doctor"),
+            (vec!["sshelf", "completions", "bash"], "completions"),
+            (vec!["sshelf", "man"], "man"),
+        ] {
+            let c = Cli::try_parse_from(&argv).unwrap();
+            assert_eq!(c.command.as_ref().unwrap().name(), expected, "{argv:?}");
+        }
+    }
+
     #[test]
     fn dash_parses_as_host_for_reconnect() {
         let c = Cli::try_parse_from(["sshelf", "-"]).unwrap();
@@ -943,6 +1135,15 @@ mod tests {
                 tailscale: true
             })
         ));
+    }
+
+    #[test]
+    fn doctor_parses_as_a_bare_subcommand() {
+        let c = Cli::try_parse_from(["sshelf", "doctor"]).unwrap();
+        assert!(matches!(c.command, Some(Command::Doctor)));
+        assert!(c.host.is_none());
+        // No flags in this release — `--json` is deliberately absent (D-027).
+        assert!(Cli::try_parse_from(["sshelf", "doctor", "--json"]).is_err());
     }
 
     #[test]

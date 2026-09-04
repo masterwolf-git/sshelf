@@ -20,11 +20,15 @@ sshelf                             # launch the TUI
 - **[Install](install.md)** — Homebrew, shell installer, `.deb`, `.rpm`, Gentoo, or cargo.
 - **[Quickstart](quickstart.md)** — the first five minutes: add or import hosts, connect.
 - **[FAQ & troubleshooting](faq.md)** — common questions, quick answers.
+- **[`sshelf doctor`](doctor.md)** — when something isn't working, run this first.
 
 ## What's in the box
 
 - An atuin-style **fuzzy launcher** with frecency ordering — [Searching & connecting](search-connect.md)
-- A dual-pane **SFTP file browser** (`Ctrl-t`) — [Transferring files](transfer.md)
+- A dual-pane **SFTP file browser** (`Ctrl-t`) — mark several, send in one go, `F7` to create a
+  directory — [Transferring files](transfer.md)
+- **tmux mode** — `Enter` opens each host in a new window or pane and keeps the picker up —
+  [Connecting inside tmux](search-connect.md#connecting-inside-tmux)
 - Background **port forwards** that survive quitting (`Ctrl-f` / `F4`) — [Port forwarding](port-forwarding.md)
 - **Sites** with a shared bastion + defaults, plus free-form tags (`F3`) — [Sites & tags](sites-tags.md)
 - Stored **passwords/passphrases** auto-supplied at connect, and **2FA** code prompts —
@@ -34,6 +38,8 @@ sshelf                             # launch the TUI
 - **Import** from `~/.ssh/config` or your whole **Tailscale tailnet** (`--tailscale`) —
   [Importing hosts](import.md)
 - A scriptable **CLI** (`sshelf add`, `list --json`, `print-command`, …) — [CLI reference](cli.md)
+- **`sshelf doctor`** — one command that checks your setup and names the fix —
+  [Checking your setup](doctor.md)
 
 Platforms: **macOS + Linux**, x86_64 and arm64. Runtime: **OpenSSH 8.4+** for password
 auto-supply.
@@ -48,6 +54,9 @@ Deciding whether to trust it — or just curious how the pieces fit?
   mechanism that supplies passwords without `sshpass`.
 
 ## Contributing
+
+Questions, ideas, and feature requests belong in
+[GitHub Discussions](https://github.com/max-rh/sshelf/discussions).
 
 Start with [`CONTRIBUTING.md`](https://github.com/max-rh/sshelf/blob/master/CONTRIBUTING.md),
 then the **Development** section in the sidebar: architecture, module map, data model, and the

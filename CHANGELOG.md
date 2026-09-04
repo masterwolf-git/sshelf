@@ -5,6 +5,70 @@ versions follow SemVer.
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-08-21
+
+### Added
+- **`sshelf doctor`** — one command that checks the things that quietly break connections and
+  names the fix for each: the OpenSSH version (8.4+ is what stored passwords ride on), whether
+  your secret backend actually opens, whether `hosts.toml` parses and has no duplicate names or
+  ids, hosts pointing at a site that no longer exists, stored secrets whose host is gone, a
+  missing or stale `$SSH_AUTH_SOCK` when hosts use agent auth, and an exported ssh_config
+  fragment that has drifted from your hosts. Each line is `ok` / `warn` / `fail` with one
+  runnable next action; it **exits 1** if anything failed, so `sshelf doctor && …` works in a
+  script. Local and read-only throughout — it never contacts a host, and the only write is a
+  throwaway keyring entry it deletes again. Full page:
+  [Checking your setup](https://max-rh.github.io/sshelf/doctor.html). No new dependencies.
+
+### Fixed
+- **Global flags now work before a subcommand.** `sshelf --config FILE list` used to be read as
+  "connect to a host named `list`", and `sshelf --config FILE set-password web` failed to parse
+  at all — despite `--config` being documented as global. Both now work, on either side of the
+  subcommand, as does `--transfer-log`. (Combining a host name *and* a subcommand —
+  `sshelf prod-web list` — is now refused explicitly instead of silently running the subcommand
+  and dropping the host.)
+
+### Changed
+- **Every user-facing error now names the thing, the cause, and the next action.** A failed save
+  names the file it couldn't write instead of just "save failed"; an unknown host, a duplicate
+  site, and an empty `--password-stdin` each say what to run instead; a failed `ssh` launch asks
+  whether OpenSSH is on your `PATH`; a forward that can't authenticate says what to check; an
+  undecryptable vault names the environment variable to fix.
+- The FAQ answers that used to end in a shrug now end in `sshelf doctor`.
+
+## [0.12.0] — 2026-08-21
+
+### Added
+- **tmux mode** — set `tmux = "window"` or `"pane"` (in `config.toml`, or on the `F2` settings
+  screen) and, when sshelf is running inside tmux, `Enter` opens the host in a new tmux window
+  (named after it) or a new pane and **leaves you in the picker**, so you can fire off several
+  connections in a row. Outside tmux, or with the default `"off"`, connecting is unchanged:
+  tear down, hand the terminal to `ssh`, exit to your shell. Frecency is recorded before the
+  window opens, exactly as before the `exec()`. Hosts whose authentication would have to travel
+  through tmux's command line — a
+  [2FA](https://max-rh.github.io/sshelf/passwords-2fa.html#two-factor-2fa-hosts) verification
+  code, or a stored secret in vault mode — connect in place instead and say why; only the
+  askpass wiring (never a secret) is ever passed to tmux. No new dependencies: sshelf runs your
+  own `tmux` binary.
+- **Transfer: mark several and send them at once** — `Space` marks the file or folder under the
+  cursor, `Ctrl-a` marks everything the filter shows (again to clear), and `Ctrl-s` sends the
+  whole set — folders recursively — through the one authenticated connection, counting through
+  the batch. An entry the destination already has is skipped and the queue carries on; the
+  summary names what was passed over. `Esc` now clears marks before clearing the filter.
+- **Transfer: create directories with `F7`** (or `Ctrl-f`) on either side — a one-line input at
+  the bottom of the focused pane. It creates exactly one directory in that pane's current
+  directory, never adopts an existing name, and puts the new directory under the cursor.
+
+### Fixed
+- Cancelling a transfer with `Esc` left the transfer screen stuck in its "transfer running"
+  state, ignoring every key but `Esc` and `Ctrl-c`. It now reports the cancellation and returns
+  to browsing.
+
+### Changed
+- The `F1` help overlay documents the transfer screen's keys and the active tmux mode.
+- README, FAQ, and the docs site point at
+  [GitHub Discussions](https://github.com/max-rh/sshelf/discussions) for questions and feature
+  requests.
+
 ## [0.11.0] — 2026-07-27
 
 ### Added
@@ -166,7 +230,9 @@ Initial public release.
 - Packaging: Homebrew tap, shell installer, Debian/Ubuntu `.deb` (x86_64 + arm64, macOS +
   Linux).
 
-[Unreleased]: https://github.com/max-rh/sshelf/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/max-rh/sshelf/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/max-rh/sshelf/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/max-rh/sshelf/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/max-rh/sshelf/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/max-rh/sshelf/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/max-rh/sshelf/compare/v0.8.0...v0.9.0
