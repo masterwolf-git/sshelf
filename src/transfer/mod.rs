@@ -25,8 +25,11 @@ use std::path::{Path, PathBuf};
 use crate::model::Host;
 
 /// Env var (also set by `--transfer-log <FILE>`) naming a file the worker appends transfer
-/// diagnostics to: the `ssh`/`sftp` commands and their stderr. No secrets are logged — the
-/// password reaches `ssh` via `SSH_ASKPASS`, never argv.
+/// diagnostics to: the `ssh` and `sftp` commands it runs, the local and remote paths they touch,
+/// their stderr, and every value the host's `extra_args` contributes. None of that is a secret —
+/// a stored password reaches `ssh` via `SSH_ASKPASS` and never appears in argv, so it is never
+/// logged — but together it describes the connection in full, so point this somewhere private.
+/// The worker opens the file `0600` and refuses to follow a symlink at that path.
 pub(crate) const LOG_ENV: &str = "SSHELF_TRANSFER_LOG";
 
 /// Direction of a transfer, named by where the bytes end up.
@@ -47,7 +50,7 @@ pub fn target(host: &Host) -> String {
 /// `-N` holds the connection without a remote command; the master is created at `control_path`
 /// and [`crate::ssh::build_args`] is reused verbatim so keys/agent/ProxyJump/port and the
 /// stored secret (via `SSH_ASKPASS`, wired by the caller) all apply exactly as on connect.
-pub fn master_args(host: &Host, control_path: &Path) -> Vec<String> {
+pub fn master_args(host: &Host, control_path: &Path, askpass: bool) -> Vec<String> {
     let mut a = vec![
         "-N".to_string(),
         "-o".to_string(),
@@ -55,7 +58,7 @@ pub fn master_args(host: &Host, control_path: &Path) -> Vec<String> {
         "-o".to_string(),
         format!("ControlPath={}", control_path.display()),
     ];
-    a.extend(crate::ssh::build_args(host, true));
+    a.extend(crate::ssh::build_args(host, true, askpass));
     a
 }
 
@@ -159,15 +162,22 @@ pub enum WorkerEvent {
     /// The master connection finished opening — `Ok(home)` carries the remote working directory
     /// to start browsing from, `Err(msg)` reports why it failed.
     Ready(Result<PathBuf, String>),
-    /// A remote-directory listing completed.
+    /// A remote-directory listing completed. `truncated` says the worker stopped short of the
+    /// whole directory — the screen has to say so rather than show a partial listing as whole.
     Listing {
         path: PathBuf,
         entries: Vec<RemoteEntry>,
+        truncated: bool,
     },
     /// Progress on the in-flight transfer.
     Progress(Progress),
     /// The in-flight transfer completed successfully.
     Done,
+    /// The transfer was passed over rather than run: the destination name appeared between the
+    /// screen's listing check and the moment the download was installed, and v1 never
+    /// overwrites. Carries the entry's name, so the screen reports it exactly as its own check
+    /// would — a skip, not a failure, so a batch send carries on.
+    Skipped(String),
     /// The in-flight transfer was cancelled at the UI's request and is fully torn down. The
     /// screen needs this to leave its "transfer running" state (Esc would otherwise strand it).
     Cancelled,
@@ -228,7 +238,7 @@ mod tests {
 
     #[test]
     fn master_args_open_a_controlmaster_and_reuse_build_args() {
-        let a = master_args(&host(), Path::new("/tmp/cm.sock"));
+        let a = master_args(&host(), Path::new("/tmp/cm.sock"), false);
         // Opens a master at our socket, holds the connection (`-N`)…
         assert!(a.contains(&"-N".to_string()));
         assert!(a.windows(2).any(|w| w == ["-o", "ControlMaster=yes"]));
@@ -244,7 +254,7 @@ mod tests {
         // sftp/scp ride that one connection — no per-command jump setup.
         let mut h = host();
         h.jump_hosts = vec!["bastion".into()];
-        let a = master_args(&h, Path::new("/tmp/cm"));
+        let a = master_args(&h, Path::new("/tmp/cm"), false);
         let j = a.iter().position(|s| s == "-J").expect("jump flag present");
         assert_eq!(a[j + 1], "bastion");
     }
@@ -255,7 +265,7 @@ mod tests {
         // (wired by the caller through ssh::configure_askpass), exactly as for connect.
         let mut h = host();
         h.auth = AuthMethod::Password;
-        let a = master_args(&h, Path::new("/tmp/cm"));
+        let a = master_args(&h, Path::new("/tmp/cm"), false);
         assert!(!a.iter().any(|s| s == "-i"));
         assert_eq!(a.last().unwrap(), "deploy@10.0.0.1");
     }

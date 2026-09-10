@@ -76,6 +76,30 @@ cargo run -- completions zsh  # shell completions (bash/zsh/fish/...); `man` pri
 # SSHELF_VAULT_PASSPHRASE is set.
 ```
 
+## CI and the release workflows
+
+`ssh2-config` ships a build script that clones the OpenSSH repository when `RELOAD_SSH_ALGO`
+is set in the environment. sshelf never sets it, and both CI and the release build fail
+loudly if it is present, so a build never reaches the network for it. Don't export it locally
+either.
+
+`.github/workflows/release.yml` began as `dist generate` output and is now hand maintained:
+every action is pinned to a commit SHA with the version in a trailing comment, permissions are
+read-only except on the job that creates the Release, and no `${{ }}` expression is expanded
+inside a `run:` block. `dist-workspace.toml` sets `allow-dirty = ["ci"]` so `dist` accepts
+those edits. Regenerate the file only by removing `allow-dirty`, running `dist generate`, then
+re-applying the pins and the permission scoping and putting `allow-dirty` back.
+
+The generated file installs `dist` by piping a downloaded script into `sh`. The hand
+maintained one downloads the same release tarball from the same pinned URL and checks it
+against a sha256 written into the workflow, one per build target. Raising
+`cargo-dist-version` means updating those hashes in the same change: take them from the
+matching `cargo-dist-installer.sh`, then confirm each against the published tarball with
+`shasum -a 256` before you commit them.
+
+Cutting a release reads a `RELEASE_TOKEN` secret from a GitHub environment named `release`,
+and only in the final push step of `cut-release.yml`.
+
 ## Hard conventions / invariants (do not violate)
 
 1. **No secrets in `hosts.toml`.** Passwords live only in the OS keyring or the `age` vault,
@@ -87,15 +111,22 @@ cargo run -- completions zsh  # shell completions (bash/zsh/fish/...); `man` pri
    unaffected by a custom config).
 2. **Update frecency state BEFORE `exec()`.** `exec()` replaces the process, so no code runs
    after it. Persist `use_count`/`last_used` first, then hand off.
-3. **The askpass helper MUST inspect `argv[1]`** (the prompt text) and answer *only* password
-   prompts. With `SSH_ASKPASS_REQUIRE=force`, ssh routes the host-key `yes/no` prompt to the
-   helper too, and answering it with the password breaks the connection. Also pass
-   `-o StrictHostKeyChecking=accept-new` so that prompt normally never fires.
+3. **The askpass helper MUST inspect `argv[1]`** (the prompt text) and answer only the prompt
+   shape that matches the secret it holds. With `SSH_ASKPASS_REQUIRE=force`, ssh routes the
+   host-key `yes/no` prompt to the helper too, and answering it with the password breaks the
+   connection. Prompt text on a keyboard-interactive round is written by the *server*, so shape
+   alone is not enough: `configure_askpass` passes `SSHELF_SECRET_KIND` and, for key hosts,
+   `SSHELF_IDENTITY_FILES`, and a secret-shaped prompt of the wrong kind is declined. Also pass
+   `-o StrictHostKeyChecking=accept-new` so the host-key prompt normally never fires, and
+   `-o PreferredAuthentications=publickey` for key hosts so a server cannot offer a password at
+   all. See D-029.
 4. **Askpass mode is detected via the `SSHELF_ASKPASS=1` env var, not a CLI flag** (ssh calls
    the helper as `sshelf "<prompt>"`).
 5. **Restore the terminal on every exit path**, including panic. Use a RAII guard + panic hook.
-6. **Jump hosts must use key/agent auth in v1** (password-auth jump hosts are unsupported;
-   the one-secret-per-target model can't disambiguate hops).
+6. **Jump hosts must use key/agent auth** (password-auth jump hosts are unsupported; the
+   one-secret-per-target model can't disambiguate hops). Since 0.14.0 the code enforces this
+   rather than only stating it: with the helper wired, one hop becomes an explicit
+   `ProxyCommand` with `BatchMode=yes`, and a chain of hops gets no helper at all. See D-029.
 7. **Platforms: macOS + Linux only** for v1 (`exec()` replacement is Unix-only).
 
 ## Where things live

@@ -99,7 +99,8 @@ pub struct App {
     /// The 2FA verification-code popup, shown before connecting to a `requires_2fa` host.
     pub two_factor: Option<TwoFactorPopup>,
     /// A one-time 2FA code collected for the pending connect; passed to `ssh` after teardown.
-    pub pending_2fa_code: Option<String>,
+    /// Held zeroizing: it is a live secret from the moment it is typed until the handoff.
+    pub pending_2fa_code: Option<zeroize::Zeroizing<String>>,
     /// The dual-pane file-transfer screen, when open.
     pub transfer: Option<transfer::TransferScreen>,
     /// Transient status line (cleared on next keypress).
@@ -655,7 +656,7 @@ impl App {
         // argv), so don't ask the keyring anything we won't use.
         let has_code = self.pending_2fa_code.is_some();
         let wire_askpass = !has_code && self.has_secret(&host.id);
-        if let Err(reason) = ssh::tmux_fallback(wire_askpass, has_code) {
+        if let Err(reason) = ssh::tmux_fallback(&host, wire_askpass, has_code) {
             self.connect_note = Some(reason.message().to_string());
             return self.queue_exec_connect(idx);
         }
@@ -893,7 +894,15 @@ fn run_with(start_add: bool) -> Result<()> {
             .is_some();
         // Replaces this process on success; returns only on failure. A 2FA code, if the user
         // entered one in the popup, rides through the askpass helper.
-        let two_fa = app.pending_2fa_code.as_deref();
+        let two_fa = app.pending_2fa_code.as_ref().map(|c| c.as_str());
+        // A chain of hops can't be constrained the way one can, so nothing is wired and ssh
+        // asks on the terminal instead. Say so before it does (D-029).
+        if matches!(
+            ssh::jump_plan(&host, has_secret || two_fa.is_some()),
+            ssh::JumpPlan::Terminal
+        ) {
+            eprintln!("sshelf: {}", ssh::MULTI_HOP_NOTICE);
+        }
         return Err(ssh::exec_connect(&host, has_secret, two_fa));
     }
     Ok(())
@@ -934,7 +943,9 @@ fn dispatch(app: &mut App, key: KeyEvent) {
             }
         }
         Outcome::Yank(idx) => {
-            let cmd = ssh::command_string(&app.hosts[idx].with_site_defaults(&app.sites));
+            let host = app.hosts[idx].with_site_defaults(&app.sites);
+            // Same flag the real connect would use, so a jump host reads the same either way.
+            let cmd = ssh::command_string(&host, app.has_secret(&host.id));
             if ssh::copy_to_clipboard(&cmd) {
                 app.set_status(format!("copied: {cmd}"));
             } else {
@@ -1143,7 +1154,10 @@ mod tests {
         // No tmux window: the code would have had to ride tmux's argv.
         assert_eq!(app.pending_connect, Some(1));
         assert!(app.should_quit);
-        assert_eq!(app.pending_2fa_code.as_deref(), Some("654321"));
+        assert_eq!(
+            app.pending_2fa_code.as_ref().map(|c| c.as_str()),
+            Some("654321")
+        );
         let note = app.connect_note.expect("the skipped window is explained");
         assert!(note.starts_with("2FA host — connecting here"), "{note}");
     }
@@ -1158,7 +1172,10 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert!(app.two_factor.is_none());
         assert_eq!(app.pending_connect, Some(1));
-        assert_eq!(app.pending_2fa_code.as_deref(), Some("654321"));
+        assert_eq!(
+            app.pending_2fa_code.as_ref().map(|c| c.as_str()),
+            Some("654321")
+        );
         assert!(app.should_quit);
     }
 
